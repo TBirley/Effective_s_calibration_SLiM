@@ -1,0 +1,11 @@
+.DS_Store
+.Rhistory
+.RData
+.Rproj.user/
+results/
+analysis_results/
+figure2a_results/
+figure2a_analysis/
+*.out
+*.err
+*.zip

@@ -1,0 +1,5 @@
+source('common.R'); m<-manifest()
+d<-rbindlist(lapply(seq_len(nrow(m)),function(i){ a<-m[i]; rbindlist(lapply(c('pre','post'),function(stage){ z<-fread(file_one(a$run_dir,paste0('_',stage,'selection_popLoad\\.txt$'))); set(z,j="stage",value=rep(stage,nrow(z))); attach_meta(z,a) })) }),fill=TRUE)
+write(d,'load_by_seed')
+long<-melt(d,id.vars=c(keys,'seed','Gen','stage'),measure.vars=c('mean_ind_relzLoad','mean_ind_relzLoad_homo','mean_ind_relzLoad_hetero','totalLoad','driftLoad','mskLoad'),variable.name='metric')
+write(long[,ci(value),by=c(keys,'Gen','stage','metric')],'load_summary')

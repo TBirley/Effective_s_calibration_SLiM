@@ -1,0 +1,640 @@
+initialize() {
+	initializeSLiMModelType("nonWF");
+	initializeSLiMOptions(keepPedigrees=T);
+	defineConstant("prizeMean", 1.0);
+	defineConstant("prizeShape", 0.245);
+	if (!exists("K")) defineConstant("K", 1000);
+	if (!exists("candidateNo")) defineConstant("candidateNo", 5000);
+	if (!exists("Mu")) defineConstant("Mu", 1e-5);
+	if (!exists("chromLength")) defineConstant("chromLength", 1000);
+	if (!exists("selCoeff")) defineConstant("selCoeff", -0.0025);
+	if (!exists("domCoeff")) defineConstant("domCoeff", 0.5);
+	if (!exists("rho")) defineConstant("rho", 0.5);
+	if (!exists("Rf")) defineConstant("Rf", 1);
+	if (!exists("Df")) defineConstant("Df", 1);
+	if (!exists("EnvSD")) defineConstant("EnvSD", 0.25);
+	if (!exists("rankMode")) defineConstant("rankMode", F);
+	if (!exists("generations")) defineConstant("generations", 30000);
+	if (!exists("trackStart")) defineConstant("trackStart", 10001);
+	if (!exists("trackEnd")) defineConstant("trackEnd", 15000);
+	if (!exists("pathto")) defineConstant("pathto", ".");
+	if (candidateNo < 2 | K < 2 | trackStart < 2 | trackEnd < trackStart | generations < trackEnd) stop("Invalid population size or tracking window.");
+	if (!rankMode & (K % 2 != 0 | candidateNo % 2 != 0 | Df >= min(c(K,candidateNo)) | Df < 1 | Rf < 1 | Rf % 2 == 0)) stop("Bernoulli mode requires even K and Nc, odd positive R, and 1 <= D < min(K,Nc).");
+	initializeMutationType("m1", domCoeff, "f", selCoeff);
+	m1.convertToSubstitution=F;
+	// Single contiguous genomic element.  
+	initializeGenomicElementType("g1", 1, 1);  //
+	initializeGenomicElement(g1, 0, asInteger(chromLength)-1);
+	// Uniform per-position recombination rate. 
+	initializeRecombinationRate(rho);
+	initializeMutationRate(Mu);
+}
+
+reproduction() {
+	/*
+	 * One SLiM cycle now represents one biological generation.
+	 * K sets founder size; candidateNo sets offspring cohort size.
+	 *
+	 * tagF stores the gamma-derived reproductive weight assigned after the
+	 * previous generation's contests. Founders are assessed in cycle 1.
+	 */
+	parents = p1.individuals;
+	if (size(parents) < 2)
+		return;
+
+	reproWeight = parents.tagF;
+	if (sum(reproWeight) <= 0.0)
+		reproWeight = rep(1.0 / size(parents), size(parents));
+	else
+		reproWeight = reproWeight / sum(reproWeight);
+
+
+
+	Noffspring = candidateNo;
+	parentIndices = seqAlong(parents);
+
+
+	for (offspringNo in 1:Noffspring)
+	{
+		// Sample both gametic contributors using the ranked gamma weights.
+		// The second draw excludes the first parent, preserving the original
+		// no-selfing rule while allowing reproductive success to be skewed.
+		parent1Index = sample(parentIndices, 1, weights=reproWeight);
+		otherIndices = parentIndices[parentIndices != parent1Index];
+		parent2Index = sample(
+			otherIndices,
+			1,
+			weights=reproWeight[otherIndices]
+		);
+
+		parent1 = parents[parent1Index];
+		parent2 = parents[parent2Index];
+
+
+		offspring = p1.addCrossed(parent1, parent2);
+
+
+    }
+
+
+    // Mutation registration is now performed from the complete offspring
+    // cohort in early(), before competition, rather than from realised parents.
+
+    // Parents are removed by viability scaling in early().
+
+    // Prevent this population-wide reproduction routine from running again
+    // for another individual during the same cycle.
+    self.active = 0;
+}
+
+1 early() {
+	sim.addSubpop("p1",K);
+	sim.mutationTypes.mutationStackPolicy = "l"; // prevent unusual mutation stacking
+
+    p1.individuals.tagF = 0.0;
+    defineConstant("outPref", "Figure2a");
+    writeFile(pathto + "/parameters.tsv", "K\tNc\tMu\trho\tchromLength\th\ts\tR\tD\tEnvSD\tmode\tgenerations\ttrackStart\ttrackEnd\tseed", append=F);
+    mode = "Bernoulli";
+    if (rankMode) mode = "Ranked";
+    writeFile(pathto + "/parameters.tsv", paste(c(K,candidateNo,Mu,rho,chromLength,domCoeff,selCoeff,Rf,Df,EnvSD,mode,generations,trackStart,trackEnd,getSeed()), sep="\t"), append=T);
+    community.rescheduleScriptBlock(s1, start=generations, end=generations);
+	HEAD = paste(
+		c("Generation",
+		  "Mutation_ID",
+		  "Origin_generation",
+		  "Position",
+		  "q",
+		  "Event"),
+		sep="	"
+	);
+
+	/*
+	 * Only one mutation-tracking cohort is now used:
+	 * all new mutations arising in candidateNo offspring during
+	 * biological generations trackStart through trackEnd.
+	 */
+
+	writeFile(
+		paste0(pathto, "/", outPref, "_trackedmutations_10-15k.txt"),
+		HEAD,
+		append=F
+	);
+
+	sim.setValue("tracked_IDs", integer(0));
+	sim.setValue("tracked_origins", integer(0));
+	sim.setValue("tracked_positions", integer(0));
+	sim.setValue("tracked_states", integer(0));
+}
+
+early() {
+	/*
+	 * Reproduction has generated the new candidate offspring cohort before
+	 * early().  These offspring form the common mutation-entry population.
+	 */
+	candidates = p1.individuals[p1.individuals.age == 0];
+
+	if (size(candidates) == 0)
+		return;
+
+	/*
+	 * The competition model is intended to produce exactly candidateNo
+	 * (=5000) offspring each generation.  Warn if that is ever violated.
+	 */
+	if (sim.cycle > 1 & size(candidates) != candidateNo)
+		print("WARNING: generation " + sim.cycle +
+		      " has " + size(candidates) +
+		      " offspring rather than candidateNo=" + candidateNo);
+
+
+	/*
+	 * ------------------------------------------------------------------
+	 * REGISTER NEW MUTATIONS FROM ALL OFFSPRING
+	 * ------------------------------------------------------------------
+	 *
+	 * Only mutations arising in generations trackStart–trackEnd are registered.
+	 * Registration occurs before competition, so hard selection and
+	 * competition now use the same biological mutation-entry stage.
+	 *
+	 * Initial frequency q is calculated among the candidate offspring
+	 * genomes only.  With 5000 diploid offspring this gives a constant
+	 * denominator of 10000 chromosomes in every treatment.
+	 */
+	if ((sim.cycle >= trackStart) & (sim.cycle <= trackEnd))
+	{
+		candidateGenomes = candidates.genomes;
+
+		newMuts = unique(candidateGenomes.mutations);
+
+		if (size(newMuts) > 0)
+			newMuts = newMuts[newMuts.originTick == sim.cycle];
+
+		if (size(newMuts) > 0)
+		{
+			outputFile = paste0(
+				pathto,
+				"/",
+				outPref,
+				"_trackedmutations_10-15k.txt"
+			);
+
+			TM_IDs = sim.getValue("tracked_IDs");
+			TM_origins = sim.getValue("tracked_origins");
+			TM_positions = sim.getValue("tracked_positions");
+			TM_states = sim.getValue("tracked_states");
+
+			chromosomeCount = size(candidateGenomes);
+			newFreqs = float(size(newMuts));
+			newStates = integer(size(newMuts));
+
+			for (i in seqAlong(newMuts))
+			{
+				mut = newMuts[i];
+
+				newFreqs[i] =
+					sum(candidateGenomes.containsMutations(mut)) /
+					chromosomeCount;
+
+				newStates[i] = getTMState(newFreqs[i]);
+
+				writeTMEvent(
+					outputFile,
+					sim.cycle,
+					mut.id,
+					mut.originTick,
+					mut.position,
+					newFreqs[i],
+					"tracked"
+				);
+			}
+
+			TM_IDs = c(TM_IDs, newMuts.id);
+			TM_origins = c(TM_origins, newMuts.originTick);
+			TM_positions = c(TM_positions, newMuts.position);
+			TM_states = c(TM_states, newStates);
+
+			sim.setValue("tracked_IDs", TM_IDs);
+			sim.setValue("tracked_origins", TM_origins);
+			sim.setValue("tracked_positions", TM_positions);
+			sim.setValue("tracked_states", TM_states);
+		}
+	}
+
+	/*
+	 * ------------------------------------------------------------------
+	 * ORIGINAL COMPETITION / PRIZE-ALLOCATION PROCESS
+	 * ------------------------------------------------------------------
+	 */
+
+	// Cache genetic fitness before survival scaling is used to retain every
+	// candidate.  Each individual receives ONE environmentally modified
+	// realised fitness for the whole generation.
+	sim.recalculateFitness();
+
+	oldIndividuals = p1.individuals[p1.individuals.age > 0];
+	if (size(oldIndividuals) > 0)
+		oldIndividuals.fitnessScaling = 0.0;
+
+	geneticFitness = p1.cachedFitness(candidates.index);
+
+	if (EnvSD < 0.0)
+		stop("EnvSD must be >= 0.");
+
+	/*
+	 * Each individual receives one realised competitive fitness per generation:
+	 *
+	 *     realisedFitness_i = geneticFitness_i + epsilon_i
+	 *     epsilon_i ~ Normal(0, EnvSD)
+	 *
+	 * This same environmentally modified fitness is then used in every contest
+	 * that individual experiences during the generation.
+	 *
+	 * Contest outcomes remain probabilistic.  For each Bernoulli round:
+	 *
+	 *     p1 = realisedFitness_1 /
+	 *          (realisedFitness_1 + realisedFitness_2)
+	 *
+	 * If R > 1, only the Bernoulli outcome is redrawn across rounds; the
+	 * individuals' realised fitness values remain fixed for the generation.
+	 */
+    if (rankMode) {
+        // Direct ranking by genetic fitness; random tie-breaking only.
+        shuffled = sample(seqAlong(geneticFitness), size(geneticFitness));
+        rankOrder = shuffled[order(geneticFitness[shuffled], ascending=F)];
+    } else {
+        if (EnvSD > 0.0)
+            realisedFitness = geneticFitness + rnorm(size(candidates), 0.0, EnvSD);
+        else
+            realisedFitness = geneticFitness;
+        realisedFitness = ifelse(realisedFitness > 1.0e-12, realisedFitness, 1.0e-12);
+        contestScore = runBalancedContests(realisedFitness, Rf, Df);
+        rankedScore = contestScore + runif(size(contestScore));
+        rankOrder = order(rankedScore, ascending=F);
+    }
+
+	// SLiM parameterisation: rgamma(n, mean, shape). Mean 1 and shape
+	// 0.245 imply scale = 1/0.245 = 4.08163 and approximately 80:20 skew.
+	prizes = rgamma(size(candidates), prizeMean, prizeShape);
+	sortedPrizes = sort(prizes, ascending=F);
+	reproWeight = rep(0.0, size(candidates));
+	reproWeight[rankOrder] = sortedPrizes;
+	reproWeight = reproWeight / sum(reproWeight);
+	candidates.tagF = reproWeight;
+
+	// Competition affects reproduction, not immediate viability. Retain all
+	// candidates until they reproduce at the start of the next cycle.
+	candidates.fitnessScaling = 1.0e15;
+}
+
+
+late()
+{
+    if (p1.individualCount < 2)
+    {
+        print("Population has gone extinct");
+        sim.simulationFinished();
+        return;
+    }
+
+    if (sim.cycle % 100 == 0 | sim.cycle < 100)
+        print(date() + "\t" + time() + "\tSim cycle: " + sim.cycle +
+              "\tN: " + p1.individualCount +
+              "  memory usage: " + usage()/1000 + "Gb");
+
+    /*
+     * Follow mutations registered from the common candidate offspring cohort.
+     *
+     * One SLiM cycle is one biological generation.  Registration occurs
+     * in early() before competition.  From the next generation onward,
+     * mutation frequencies are evaluated in the full current population.
+     */
+    generation = sim.cycle;
+
+    if (generation >= trackStart)
+    {
+        outputFile = paste0(
+            pathto,
+            "/",
+            outPref,
+            "_trackedmutations_10-15k.txt"
+        );
+
+        TM_IDs = sim.getValue("tracked_IDs");
+        TM_origins = sim.getValue("tracked_origins");
+        TM_positions = sim.getValue("tracked_positions");
+        TM_states = sim.getValue("tracked_states");
+
+        muts = sim.mutations;
+
+        /*
+         * Process mutations already being tracked.
+         */
+        if (size(TM_IDs) > 0)
+        {
+            /*
+             * Identify tracked mutations no longer present in sim.mutations.
+             * Since convertToSubstitution = F, absence represents loss.
+             */
+            lost_mut_ids = setDifference(TM_IDs, muts.id);
+
+            if (size(lost_mut_ids) > 0)
+            {
+                for (id in lost_mut_ids)
+                {
+                    id_index = which(TM_IDs == id)[0];
+
+                    writeTMEvent(
+                        outputFile,
+                        generation,
+                        id,
+                        TM_origins[id_index],
+                        TM_positions[id_index],
+                        0.0,
+                        "lost"
+                    );
+
+                    keep = TM_IDs != id;
+
+                    TM_IDs = TM_IDs[keep];
+                    TM_origins = TM_origins[keep];
+                    TM_positions = TM_positions[keep];
+                    TM_states = TM_states[keep];
+                }
+            }
+
+            /*
+             * Recover mutation objects in the same order as the aligned
+             * tracking vectors.
+             */
+            if (size(TM_IDs) > 0)
+            {
+                TM_muts = c();
+
+                for (id in TM_IDs)
+                    TM_muts = c(TM_muts, muts[muts.id == id]);
+
+                freqs = sim.mutationFrequencies(p1, TM_muts);
+
+                /*
+                 * Record fixation and remove fixed mutations.
+                 */
+                fixed_indices = which(freqs >= 1.0);
+
+                if (size(fixed_indices) > 0)
+                {
+                    for (i in fixed_indices)
+                    {
+                        writeTMEvent(
+                            outputFile,
+                            generation,
+                            TM_IDs[i],
+                            TM_origins[i],
+                            TM_positions[i],
+                            1.0,
+                            "fixed"
+                        );
+                    }
+
+                    keep = freqs < 1.0;
+
+                    TM_IDs = TM_IDs[keep];
+                    TM_origins = TM_origins[keep];
+                    TM_positions = TM_positions[keep];
+                    TM_states = TM_states[keep];
+
+                    TM_muts = TM_muts[keep];
+                    freqs = freqs[keep];
+                }
+
+                /*
+                 * Record upward and downward threshold crossings.
+                 */
+                if (size(TM_IDs) > 0)
+                {
+                    for (i in seqAlong(TM_IDs))
+                    {
+                        id = TM_IDs[i];
+                        origin = TM_origins[i];
+                        position = TM_positions[i];
+                        previous_state = TM_states[i];
+                        q = freqs[i];
+                        new_state = getTMState(q);
+
+                        if (new_state > previous_state)
+                        {
+                            for (boundary in seq(previous_state, new_state - 1))
+                            {
+                                if (boundary == 1)
+                                    event = "cross_0.05_up";
+                                else if (boundary == 2)
+                                    event = "cross_0.1_up";
+                                else if (boundary == 3)
+                                    event = "cross_0.2_up";
+                                else if (boundary == 4)
+                                    event = "cross_0.5_up";
+                                else
+                                    stop("Invalid upward threshold boundary.");
+
+                                writeTMEvent(
+                                    outputFile,
+                                    generation,
+                                    id,
+                                    origin,
+                                    position,
+                                    q,
+                                    event
+                                );
+                            }
+                        }
+                        else if (new_state < previous_state)
+                        {
+                            for (boundary in seq(previous_state - 1, new_state, by=-1))
+                            {
+                                if (boundary == 1)
+                                    event = "cross_0.05_down";
+                                else if (boundary == 2)
+                                    event = "cross_0.1_down";
+                                else if (boundary == 3)
+                                    event = "cross_0.2_down";
+                                else if (boundary == 4)
+                                    event = "cross_0.5_down";
+                                else
+                                    stop("Invalid downward threshold boundary.");
+
+                                writeTMEvent(
+                                    outputFile,
+                                    generation,
+                                    id,
+                                    origin,
+                                    position,
+                                    q,
+                                    event
+                                );
+                            }
+                        }
+
+                        TM_states[i] = new_state;
+                    }
+                }
+            }
+        }
+
+        sim.setValue("tracked_IDs", TM_IDs);
+        sim.setValue("tracked_origins", TM_origins);
+        sim.setValue("tracked_positions", TM_positions);
+        sim.setValue("tracked_states", TM_states);
+    }
+}
+
+/*
+ * End after the configured final generation.
+ * Any mutation still segregating is right-censored in the single
+ * registration-window tracking file.
+ */
+s1 30000 late()
+{
+    generation = sim.cycle;
+
+    outputFile = paste0(
+        pathto,
+        "/",
+        outPref,
+        "_trackedmutations_10-15k.txt"
+    );
+
+    TM_IDs = sim.getValue("tracked_IDs");
+    TM_origins = sim.getValue("tracked_origins");
+    TM_positions = sim.getValue("tracked_positions");
+
+    if (size(TM_IDs) > 0)
+    {
+        muts = sim.mutations;
+
+        for (i in seqAlong(TM_IDs))
+        {
+            id = TM_IDs[i];
+            mut = muts[muts.id == id];
+
+            if (size(mut) == 1)
+            {
+                q = sim.mutationFrequencies(p1, mut);
+
+                writeTMEvent(
+                    outputFile,
+                    generation,
+                    id,
+                    TM_origins[i],
+                    TM_positions[i],
+                    q,
+                    "censored"
+                );
+            }
+        }
+    }
+
+    writeFile(pathto + "/completed.txt", asString(generation), append=F);
+    print("Simulation finished");
+    sim.simulationFinished();
+}
+
+
+/*
+ * Give every candidate exactly D distinct rivals using the circle method for
+ * a balanced round-robin schedule.
+ *
+ * Each candidate enters this function with ONE realised fitness that has
+ * already been modified by environmental noise for the current generation:
+ *
+ *     realisedFitness_i = geneticFitness_i + epsilon_i
+ *     epsilon_i ~ Normal(0, EnvSD)
+ *
+ * That realised fitness remains fixed across all opponents and all repeated
+ * rounds during the generation.
+ *
+ * For each Bernoulli round between individuals 1 and 2:
+ *
+ *     p1 = realisedFitness_1 /
+ *          (realisedFitness_1 + realisedFitness_2)
+ *
+ * The winner is sampled with this probability.  If R > 1, repeated Bernoulli
+ * outcomes are independent conditional on the same fixed pair of realised
+ * fitness values, and the majority winner defeats that rival.
+ *
+ * Thus increasing R averages contest stochasticity, but DOES NOT average away
+ * the environmental deviation assigned to an individual for that generation.
+ */
+function (i) runBalancedContests(f realisedFitness, i$ R, i$ D)
+{
+	N = size(realisedFitness);
+
+	if (N % 2 != 0)
+		stop("The candidate cohort must contain an even number of individuals.");
+	if (R < 1 | R % 2 == 0)
+		stop("Rf must be a positive odd integer.");
+	if (D < 1 | D >= N)
+		stop("Df must be between 1 and N-1.");
+
+	contestScore = integer(N);
+	schedule = sample(seqLen(N), N, replace=F);
+	halfN = asInteger(N / 2);
+
+	for (opponentRound in 1:D)
+	{
+		// Pair the first and last positions, the second and penultimate,
+		// and so on.  The circle-method rotation ensures distinct rivals.
+		ind1Indices = schedule[0:(halfN - 1)];
+		ind2Indices = schedule[(N - 1):halfN];
+
+		fit1 = realisedFitness[ind1Indices];
+		fit2 = realisedFitness[ind2Indices];
+
+		// Fixed realised fitness determines the Bernoulli probability for this
+		// dyad; only the Bernoulli outcome changes across repeated rounds.
+		prob1 = fit1 / (fit1 + fit2);
+
+		ind1RoundWins = integer(halfN);
+
+		for (contestRound in 1:R)
+			ind1RoundWins = ind1RoundWins + asInteger(runif(halfN) < prob1);
+
+		// R is odd, so the majority winner is unique.
+		ind1Wins = ind1RoundWins > (R / 2);
+
+		winner1Indices = ind1Indices[ind1Wins];
+		winner2Indices = ind2Indices[!ind1Wins];
+
+		contestScore[winner1Indices] =
+			contestScore[winner1Indices] + 1;
+		contestScore[winner2Indices] =
+			contestScore[winner2Indices] + 1;
+
+		if (opponentRound < D)
+			schedule = c(schedule[0], schedule[N - 1], schedule[1:(N - 2)]);
+	}
+
+	return contestScore;
+}
+
+
+function (void) writeTMEvent(s$ outputFile, i$ generation, i$ id,
+                             i$ origin, i$ position, f$ q, s$ event)
+{
+    OUT = paste(c(generation, id, origin, position, q, event), sep="\t");
+    writeFile(outputFile, OUT, append=T);
+}
+
+
+function (i$) getTMState(f$ q)
+{
+    if (q < 0.05)
+        return 1;
+    if (q < 0.1)
+        return 2;
+    if (q < 0.2)
+        return 3;
+    if (q < 0.5)
+        return 4;
+
+    return 5;
+}
+
+

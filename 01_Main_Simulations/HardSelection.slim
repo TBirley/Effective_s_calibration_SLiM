@@ -1,0 +1,828 @@
+// SLiM 4.3.0; parameters may be overridden using -d.
+initialize() {
+    initializeSLiMModelType("nonWF");
+    initializeSLiMOptions(keepPedigrees=T);
+    if (!exists("K")) defineConstant("K", 1000);
+    if (!exists("candidateNo")) defineConstant("candidateNo", asInteger(5*K));
+    if (!exists("Mu")) defineConstant("Mu", 1e-5);
+    if (!exists("chromLength")) defineConstant("chromLength", 1000);
+    if (!exists("selCoeff")) defineConstant("selCoeff", -0.001);
+    if (!exists("domCoeff")) defineConstant("domCoeff", 0.5);
+    if (!exists("rho")) defineConstant("rho", 0.5);
+    if (!exists("generations")) defineConstant("generations", 30000);
+    if (!exists("trackStart")) defineConstant("trackStart", 10001);
+    if (!exists("trackEnd")) defineConstant("trackEnd", 15000);
+    if (!exists("pathto")) defineConstant("pathto", "results");
+    if (K < 2 | candidateNo < K | generations < trackEnd | trackStart < 2 | trackEnd < trackStart)
+        stop("Invalid population size or tracking interval.");
+    defineConstant("targetOffspring", candidateNo);
+    initializeMutationType("m1", domCoeff, "f", selCoeff);
+    m1.convertToSubstitution=F;
+    initializeGenomicElementType("g1", 1, 1);
+    initializeGenomicElement(g1, 0, chromLength-1);
+    initializeRecombinationRate(rho);
+    initializeMutationRate(Mu);
+}
+
+reproduction() {
+	if (sim.cycle % 2 == 1) {
+
+		// K determines the maximum number of adults that can reproduce.
+		if (K < p1.individualCount)
+			mpno = K;
+		else
+			mpno = p1.individualCount;
+
+		// Monogamous pairing requires an even number of parents.
+		if (mpno % 2 == 1)
+			mpno = asInteger(mpno - 1);
+
+		if (mpno < 2)
+		{
+			self.active = 0;
+			return;
+		}
+
+		// Randomise parental order, as in the original model.
+		parents = sample(p1.individuals, mpno);
+		sim.setValue("breederIDs", parents.pedigreeID);
+
+		/*
+		 * Produce exactly targetOffspring offspring, irrespective
+		 * of K, while retaining one monogamous mate per parent.
+		 *
+		 * Offspring are divided as evenly as possible among pairs.
+		 * Examples:
+		 *   K=1000 -> 500 pairs -> 10 offspring per pair
+		 *   K=800  -> 400 pairs -> 12 or 13 offspring per pair
+		 */
+		pairCount = asInteger(mpno / 2);
+		baseLitter = asInteger(floor(targetOffspring / pairCount));
+		extraOffspring = asInteger(targetOffspring - (baseLitter * pairCount));
+
+		for (pairIndex in seq(0, pairCount - 1))
+		{
+			parent1 = parents[2 * pairIndex];
+			parent2 = parents[(2 * pairIndex) + 1];
+
+			pairLitter = baseLitter;
+			if (pairIndex < extraOffspring)
+				pairLitter = pairLitter + 1;
+
+			for (j in seqLen(pairLitter))
+			{
+				offspring = p1.addCrossed(parent1, parent2);
+				offspring.setValue("parent1", parent1.pedigreeID);
+				offspring.setValue("parent2", parent2.pedigreeID);
+			}
+		}
+
+		self.active = 0;
+	}
+}
+
+1 early() {
+	createDirectory(pathto);
+    for (folder in c("Output_Load", "Output_SFS", "Output_Vk", "Output_TMs_10-15k", "Output_MaxQ_10-15k"))
+        createDirectory(paste0(pathto, "/", folder));
+    sim.addSubpop("p1", K);
+    community.rescheduleScriptBlock(s1, start=2*generations, end=2*generations);
+	sim.mutationTypes.mutationStackPolicy = "l";
+
+	defineConstant("outPref", paste0("HardSelection_K", K, "_Nc", candidateNo, "_Mu", Mu, "_rho", rho, "_L", chromLength, "_selCoeff", selCoeff, "_h", domCoeff, "_Seed", getSeed()));
+    writeFile(paste0(pathto, "/", outPref, "_parameters.txt"), paste(c("K", "Nc", "Mu", "rho", "chromLength", "s", "h", "generations", "trackStart", "trackEnd", "seed"), sep="\t") + "\n" + paste(c(K, candidateNo, Mu, rho, chromLength, selCoeff, domCoeff, generations, trackStart, trackEnd, getSeed()), sep="\t"), append=F);
+  	
+  	    // Initialise genetic-load output files.
+    // These use the same estimators and columns as HardSelectionLoad.slim.
+    // Output directory: Output_Load
+
+    LOAD_HEAD = paste(c(
+        "Gen", "pop", "SampleSize", "N", "mutCount", "NA",
+        "totalLoad", "exp_relzLoad", "exp_relzLoad_homo",
+        "exp_relzLoad_hetero", "total_ind_relzLoad",
+        "total_ind_relzLoad_homo", "total_ind_relzLoad_hetero",
+        "mean_ind_relzLoad", "mean_ind_relzLoad_homo",
+        "mean_ind_relzLoad_hetero", "mskLoad", "driftLoad",
+        "mean_fit(cached)", "var_fit(cached)"), sep="\t");
+
+    writeFile(paste0(pathto, "/Output_Load/", outPref, "_preselection_popLoad.txt"),
+              LOAD_HEAD, append=F);
+
+    writeFile(paste0(pathto, "/Output_Load/", outPref, "_postselection_popLoad.txt"),
+              LOAD_HEAD, append=F);
+              
+	// Output directory: Output_SFS
+
+    writeFile(paste0(pathto, "/Output_SFS/", outPref, "_mutation_frequencies.txt"), "Generation\tCycle\tStage\tMutation_ID\tOrigin_generation\tAge_ticks\ts\th\tq\tChromosome_count", append=F);
+
+	HEAD = paste(
+		c("Generation",
+		  "Mutation_ID",
+		  "Origin_generation",
+		  "Position",
+		  "q",
+		  "Event"),
+		sep="	"
+	);
+
+	// Only mutations arising in offspring during generations 10001-15000
+	// are registered for tracking.
+	// Output directory: Output_TMs_10-15k
+	writeFile(
+		paste0(pathto, "/Output_TMs_10-15k/", outPref, "_trackedmutations_10-15k.txt"),
+		HEAD,
+		append=F
+	);
+
+	writeFile(paste0(pathto, "/Output_Vk/", outPref, "_Vk.txt"), "Generation\tPopulation_size\tPotential_breeders\tRecruits\tMean_gametic_contribution\tVk\tNe_from_Vk", append=F);
+    sim.setValue("tracked_IDs", integer(0));
+	sim.setValue("tracked_origins", integer(0));
+	sim.setValue("tracked_positions", integer(0));
+	sim.setValue("tracked_states", integer(0));
+    sim.setValue("maxIDs", integer(0));
+    sim.setValue("maxOrigins", integer(0));
+    sim.setValue("maxPositions", integer(0));
+    sim.setValue("maxInitial", float(0));
+    sim.setValue("maxValues", float(0));
+    writeFile(paste0(pathto, "/Output_MaxQ_10-15k/", outPref, "_maxq_10-15k.txt"), "Mutation_ID\tOrigin_generation\tPosition\tInitial_q\tMax_q\tFate\tEnd_generation\tAge\tFinal_q", append=F);
+}
+
+early() {
+	if (sim.cycle % 2 == 1) {
+
+		generation = asInteger((sim.cycle + 1) / 2);
+
+		/*
+		 * Offspring have already been generated, but viability selection
+		 * has not yet occurred.  This is the common pre-selection offspring
+		 * stage used for mutation registration.
+		 */
+		offspringInds = p1.individuals[p1.individuals.age == 0];
+		
+		        // LOAD: pre-selection offspring cohort.
+        // Sample every 100 biological generations.
+        if ((generation % 100 == 0) & (size(offspringInds) > 0))
+        {
+            // Obtain cached fitness before adult removal.
+            sim.recalculateFitness();
+
+            preFitness = p1.cachedFitness(offspringInds.index);
+
+            // Output directory: Output_Load
+
+            OUT = getGroupLoad(
+                offspringInds,
+                generation,
+                preFitness
+            );
+
+            writeFile(
+                paste0(pathto, "/Output_Load/", outPref, "_preselection_popLoad.txt"),
+                OUT,
+                append=T
+            );
+        }
+
+		if ((sim.cycle % 2000 == 1) | (generation == generations)) {
+			// Output directory: Output_SFS
+			writeMutationFrequencies(p1, "pre_selection");
+
+		}
+
+		/*
+		 * Register ALL newly arisen mutations in the candidateNo offspring
+		 * during biological generations 10001-15000.
+		 *
+		 * Initial q is calculated only among the offspring genomes.
+		 * With candidateNo diploid offspring, the denominator is therefore
+		 * 2 * candidateNo chromosomes for every K treatment.
+		 */
+		if ((generation >= trackStart) & (generation <= trackEnd))
+		{
+			if (size(offspringInds) != targetOffspring)
+				print("WARNING: generation " + generation +
+				      " has " + size(offspringInds) +
+				      " offspring rather than targetOffspring=" + targetOffspring);
+
+			offspringGenomes = offspringInds.genomes;
+			new_tracked_muts = unique(offspringGenomes.mutations);
+
+			// Mutations produced during reproduction in this odd cycle.
+			if (size(new_tracked_muts) > 0)
+				new_tracked_muts = new_tracked_muts[
+					new_tracked_muts.originTick == sim.cycle
+				];
+
+			sample_size = size(new_tracked_muts);
+
+			if (sample_size > 0)
+			{
+				outputFile = paste0(
+					pathto,
+					"/Output_TMs_10-15k/",
+					outPref,
+					"_trackedmutations_10-15k.txt"
+				);
+
+				TM_IDs = sim.getValue("tracked_IDs");
+				TM_origins = sim.getValue("tracked_origins");
+				TM_positions = sim.getValue("tracked_positions");
+				TM_states = sim.getValue("tracked_states");
+
+				chromosomeCount = size(offspringGenomes);
+				new_freqs = float(sample_size);
+
+				for (i in seqAlong(new_tracked_muts))
+					new_freqs[i] =
+						sum(offspringGenomes.containsMutations(new_tracked_muts[i])) /
+						chromosomeCount;
+
+				new_origins = rep(generation, sample_size);
+				new_states = integer(sample_size);
+
+				for (i in seqAlong(new_freqs))
+					new_states[i] = getTMState(new_freqs[i]);
+
+				for (i in seqAlong(new_tracked_muts))
+				{
+					mut = new_tracked_muts[i];
+
+					writeTMEvent(
+						outputFile,
+						generation,
+						mut.id,
+						new_origins[i],
+						mut.position,
+						new_freqs[i],
+						"tracked"
+					);
+				}
+
+				registerMax(new_tracked_muts.id, new_origins, new_tracked_muts.position, new_freqs);
+            TM_IDs = c(TM_IDs, new_tracked_muts.id);
+				TM_origins = c(TM_origins, new_origins);
+				TM_positions = c(TM_positions, new_tracked_muts.position);
+				TM_states = c(TM_states, new_states);
+
+				sim.setValue("tracked_IDs", TM_IDs);
+				sim.setValue("tracked_origins", TM_origins);
+				sim.setValue("tracked_positions", TM_positions);
+				sim.setValue("tracked_states", TM_states);
+			}
+		}
+
+		// Remove adults; offspring then experience absolute-fitness viability selection.
+		p1.individuals[p1.individuals.age > 0].fitnessScaling = 0.0;
+	}
+	else {
+		/*
+		 * Density regulation after viability selection.  If more than K
+		 * individuals survive, randomly cull the excess to K.
+		 */
+		p1.individuals.fitnessScaling = 100000000000000000.0;
+
+		if (p1.individualCount > K) {
+			unlucky = sample(
+				p1.individuals,
+				asInteger(p1.individualCount - K)
+			);
+			unlucky.fitnessScaling = 0.0;
+		}
+	}
+}
+
+
+late()
+{
+    if (p1.individualCount < 2)
+    {
+        writeFile(paste0(pathto, "/", outPref, "_status.txt"), "extinct\t" + sim.cycle, append=F);
+        print("Population has gone extinct");
+        sim.simulationFinished();
+        return;
+    }
+		
+	    // LOAD: retain intrinsic fitness after viability selection.
+    // The next (even) cycle overwrites fitnessScaling during
+    // density regulation, so cached fitness must be saved now.
+
+    if (sim.cycle % 2 == 1)
+    {
+        p1.individuals.tagF = p1.cachedFitness(NULL);
+    }
+    else
+    {
+        // Density regulation has finished.
+        // These individuals form the realised parental cohort.
+
+        generation = asInteger((sim.cycle + 1) / 2);
+
+        if ((generation % 100 == 0) & (p1.individualCount > 0))
+        {
+            parentInds = p1.individuals;
+
+            // Retrieve fitness saved after viability selection.
+            postFitness = parentInds.tagF;
+
+            // Output directory: Output_Load
+
+            OUT = getGroupLoad(
+                parentInds,
+                generation,
+                postFitness
+            );
+
+            writeFile(
+                paste0(pathto, "/Output_Load/", outPref, "_postselection_popLoad.txt"),
+                OUT,
+                append=T
+            );
+        }
+    }
+    		
+    if (sim.cycle % 200 == 0 | (sim.cycle %2 ==0 & sim.cycle <200))
+        print(date() + "\t" + time() + "\tSim cycle: " + sim.cycle +
+              "\tN: " + p1.individualCount +
+              "  memory usage: " + usage()/1000 + "Gb");
+
+    /*
+     * Record variance in reproductive success every 1000 biological
+     * generations (2000 SLiM cycles in this two-cycle life cycle).
+     */
+    breederIDs = sim.getValue("breederIDs");
+
+    if (!isNULL(breederIDs) & (sim.cycle % 2000 == 0))
+    {
+        recruits = p1.individuals[p1.individuals.age == 1];
+        parentIDs = c();
+
+        for (ind in recruits)
+        {
+            p1_id = ind.getValue("parent1");
+            p2_id = ind.getValue("parent2");
+
+            if (!isNULL(p1_id))
+                parentIDs = c(parentIDs, p1_id);
+            if (!isNULL(p2_id))
+                parentIDs = c(parentIDs, p2_id);
+        }
+
+        offspringCounts = rep(0, size(breederIDs));
+        for (i in seqAlong(breederIDs))
+            offspringCounts[i] = sum(parentIDs == breederIDs[i]);
+
+        meanK = mean(offspringCounts);
+        Vk = var(offspringCounts);
+        Ne_from_Vk = ((4 * size(breederIDs)) - 2) / (Vk + 2);
+
+        // Output directory: Output_Vk
+        OUT = paste(c(asInteger((sim.cycle + 1) / 2),
+                      p1.individualCount,
+                      size(breederIDs),
+                      size(recruits),
+                      meanK,
+                      Vk,
+                      Ne_from_Vk), sep="\t");
+        writeFile(paste0(pathto, "/Output_Vk/", outPref, "_Vk.txt"), OUT, append=T);
+    }
+
+    /*
+     * Follow mutations registered from the common candidate-offspring cohort.
+     *
+     * Registration occurs in the preceding odd cycle before viability
+     * selection. Frequencies are evaluated here in the following even
+     * cycle after viability selection and density regulation, i.e. in
+     * the parental population.
+     */
+    generation = asInteger((sim.cycle + 1) / 2);
+
+    if (generation >= trackStart & sim.cycle % 2 == 0) updateMax(generation, F);
+    if ((generation >= trackStart) & (sim.cycle % 2 == 0))
+    {
+        outputFile = paste0(
+            pathto,
+            "/Output_TMs_10-15k/",
+            outPref,
+            "_trackedmutations_10-15k.txt"
+        );
+
+        TM_IDs = sim.getValue("tracked_IDs");
+        TM_origins = sim.getValue("tracked_origins");
+        TM_positions = sim.getValue("tracked_positions");
+        TM_states = sim.getValue("tracked_states");
+
+        muts = sim.mutations;
+
+        if (size(TM_IDs) > 0)
+        {
+            // Mutations absent from sim.mutations have been lost.
+            lost_mut_ids = setDifference(TM_IDs, muts.id);
+
+            if (size(lost_mut_ids) > 0)
+            {
+                for (id in lost_mut_ids)
+                {
+                    id_index = which(TM_IDs == id)[0];
+
+                    writeTMEvent(
+                        outputFile,
+                        generation,
+                        id,
+                        TM_origins[id_index],
+                        TM_positions[id_index],
+                        0.0,
+                        "lost"
+                    );
+
+                    keep = TM_IDs != id;
+
+                    TM_IDs = TM_IDs[keep];
+                    TM_origins = TM_origins[keep];
+                    TM_positions = TM_positions[keep];
+                    TM_states = TM_states[keep];
+                }
+            }
+
+            if (size(TM_IDs) > 0)
+            {
+                // Recover mutation objects in the same order as the tracking vectors.
+                TM_muts = c();
+
+                for (id in TM_IDs)
+                    TM_muts = c(TM_muts, muts[muts.id == id]);
+
+                freqs = sim.mutationFrequencies(p1, TM_muts);
+
+                // Record fixation and remove fixed mutations from tracking.
+                fixed_indices = which(freqs >= 1.0);
+
+                if (size(fixed_indices) > 0)
+                {
+                    for (i in fixed_indices)
+                    {
+                        writeTMEvent(
+                            outputFile,
+                            generation,
+                            TM_IDs[i],
+                            TM_origins[i],
+                            TM_positions[i],
+                            1.0,
+                            "fixed"
+                        );
+                    }
+
+                    keep = freqs < 1.0;
+
+                    TM_IDs = TM_IDs[keep];
+                    TM_origins = TM_origins[keep];
+                    TM_positions = TM_positions[keep];
+                    TM_states = TM_states[keep];
+
+                    TM_muts = TM_muts[keep];
+                    freqs = freqs[keep];
+                }
+
+                // Record threshold crossings.
+                if (size(TM_IDs) > 0)
+                {
+                    for (i in seqAlong(TM_IDs))
+                    {
+                        id = TM_IDs[i];
+                        origin = TM_origins[i];
+                        position = TM_positions[i];
+                        previous_state = TM_states[i];
+                        q = freqs[i];
+                        new_state = getTMState(q);
+
+                        if (new_state > previous_state)
+                        {
+                            for (boundary in seq(previous_state, new_state - 1))
+                            {
+                                if (boundary == 1)
+                                    event = "cross_0.05_up";
+                                else if (boundary == 2)
+                                    event = "cross_0.1_up";
+                                else if (boundary == 3)
+                                    event = "cross_0.2_up";
+                                else if (boundary == 4)
+                                    event = "cross_0.5_up";
+                                else
+                                    stop("Invalid upward threshold boundary.");
+
+                                writeTMEvent(
+                                    outputFile,
+                                    generation,
+                                    id,
+                                    origin,
+                                    position,
+                                    q,
+                                    event
+                                );
+                            }
+                        }
+                        else if (new_state < previous_state)
+                        {
+                            for (boundary in seq(previous_state - 1, new_state, by=-1))
+                            {
+                                if (boundary == 1)
+                                    event = "cross_0.05_down";
+                                else if (boundary == 2)
+                                    event = "cross_0.1_down";
+                                else if (boundary == 3)
+                                    event = "cross_0.2_down";
+                                else if (boundary == 4)
+                                    event = "cross_0.5_down";
+                                else
+                                    stop("Invalid downward threshold boundary.");
+
+                                writeTMEvent(
+                                    outputFile,
+                                    generation,
+                                    id,
+                                    origin,
+                                    position,
+                                    q,
+                                    event
+                                );
+                            }
+                        }
+
+                        TM_states[i] = new_state;
+                    }
+                }
+            }
+        }
+
+        sim.setValue("tracked_IDs", TM_IDs);
+        sim.setValue("tracked_origins", TM_origins);
+        sim.setValue("tracked_positions", TM_positions);
+        sim.setValue("tracked_states", TM_states);
+    }
+}
+
+// Final observation and right-censoring at the configured end generation.
+s1 60000 late()
+{
+    generation = asInteger((sim.cycle + 1) / 2);
+
+    updateMax(generation, T);
+    outputFile = paste0(
+        pathto,
+        "/Output_TMs_10-15k/",
+        outPref,
+        "_trackedmutations_10-15k.txt"
+    );
+
+    TM_IDs = sim.getValue("tracked_IDs");
+    TM_origins = sim.getValue("tracked_origins");
+    TM_positions = sim.getValue("tracked_positions");
+
+    if (size(TM_IDs) > 0)
+    {
+        muts = sim.mutations;
+
+        for (i in seqAlong(TM_IDs))
+        {
+            id = TM_IDs[i];
+            mut = muts[muts.id == id];
+
+            if (size(mut) == 1)
+            {
+                q = sim.mutationFrequencies(p1, mut);
+
+                writeTMEvent(
+                    outputFile,
+                    generation,
+                    id,
+                    TM_origins[i],
+                    TM_positions[i],
+                    q,
+                    "censored"
+                );
+            }
+        }
+    }
+
+    writeFile(paste0(pathto, "/", outPref, "_status.txt"), "completed\t" + generations, append=F);
+    print("Simulation finished");
+    sim.simulationFinished();
+}
+
+
+function (void) writeTMEvent(s$ outputFile, i$ generation, i$ id,
+                             i$ origin, i$ position, f$ q, s$ event)
+{
+    OUT = paste(c(generation, id, origin, position, q, event), sep="\t");
+    writeFile(outputFile, OUT, append=T);
+}
+
+
+function (i$) getTMState(f$ q)
+{
+    if (q < 0.05)
+        return 1;
+    if (q < 0.1)
+        return 2;
+    if (q < 0.2)
+        return 3;
+    if (q < 0.5)
+        return 4;
+
+    return 5;
+}
+
+
+function (void) writeMutationFrequencies(o<Subpopulation>$ pop, s$ stage)
+{
+    inds = pop.individuals[pop.individuals.age == 0];
+
+    if (size(inds) == 0)
+        return;
+
+    genomes = inds.genomes;
+    muts = unique(genomes.mutations);
+
+    if (size(muts) == 0) {
+        writeFile(paste0(pathto, "/Output_SFS/", outPref, "_mutation_frequencies.txt"),
+                  paste(c(asInteger((sim.cycle + 1) / 2), sim.cycle, stage, -1, -1, -1, selCoeff, domCoeff, 0.0, size(genomes)), sep="\t"), append=T);
+        return;
+    }
+
+    chromosomeCount = size(genomes);
+    output = NULL;
+
+    for (mut in muts)
+    {
+        frequency = sum(genomes.containsMutations(mut)) / chromosomeCount;
+
+        row = asInteger((sim.cycle + 1) / 2) + "\t" +
+              sim.cycle + "\t" +
+              stage + "\t" +
+              mut.id + "\t" +
+              asInteger((mut.originTick + 1) / 2) + "\t" +
+              (sim.cycle - mut.originTick) + "\t" +
+              mut.selectionCoeff + "\t" +
+              mut.mutationType.dominanceCoeff + "\t" +
+              frequency + "\t" +
+              chromosomeCount;
+
+        output = c(output, row);
+    }
+
+    writeFile(paste0(pathto, "/Output_SFS/", outPref, "_mutation_frequencies.txt"),
+              paste(output, sep="\n"), append=T);
+}
+
+
+function (s) getGroupLoad(o inds, i generation, f fitness_cached) {
+    Pop_size = size(inds);
+    indvCount = Pop_size;
+
+    if (Pop_size == 0)
+        stop("getGroupLoad() received an empty cohort.");
+
+    genomes = inds.genomes;
+    m_uniq = unique(genomes.mutations);
+    Mutcount = size(m_uniq);
+
+    // ------------------------------------------------------------
+    // Population/cohort frequency-based estimators
+    // ------------------------------------------------------------
+    if (Mutcount > 0) {
+        freqMut = genomes.mutationFrequenciesInGenomes(m_uniq);
+        ScoefMut = abs(m_uniq.selectionCoeff);
+        DcoefMut = m_uniq.mutationType.dominanceCoeff;
+
+        // Genetic/total load: sum(q_i * |s_i|)
+        totalLoad = sum(freqMut * ScoefMut);
+
+        // Expected realised load from allele frequencies.
+        pop_relzLoad_homo = sum(freqMut^2 * ScoefMut);
+        pop_relzLoad_hetero = 2.0 * sum(
+            freqMut * (1.0 - freqMut) * ScoefMut * DcoefMut
+        );
+        pop_relzLoad = pop_relzLoad_homo + pop_relzLoad_hetero;
+
+        // Masked load.
+        mskLoad = totalLoad - pop_relzLoad;
+
+        // Mutations fixed within the measured cohort.
+        m_fixed = m_uniq[freqMut == 1.0];
+        if (size(m_fixed) > 0)
+            driftLoad = sum(abs(m_fixed.selectionCoeff));
+        else
+            driftLoad = 0.0;
+    }
+    else {
+        totalLoad = 0.0;
+        pop_relzLoad_homo = 0.0;
+        pop_relzLoad_hetero = 0.0;
+        pop_relzLoad = 0.0;
+        mskLoad = 0.0;
+        driftLoad = 0.0;
+    }
+
+    // ------------------------------------------------------------
+    // Individual genotype-based realised-load estimator
+    // ------------------------------------------------------------
+    total_ind_relzLoad_homo = 0.0;
+    total_ind_relzLoad_hetero = 0.0;
+
+    for (indv in inds) {
+        rl_homo = 0.0;
+        rl_hetero = 0.0;
+
+        muts0 = indv.genomes[0].mutations;
+        muts1 = indv.genomes[1].mutations;
+
+        HOMO = setIntersection(muts0, muts1);
+        HETERO = setSymmetricDifference(muts0, muts1);
+
+        if (size(HOMO) > 0)
+            rl_homo = sum(abs(HOMO.selectionCoeff));
+
+        if (size(HETERO) > 0)
+            rl_hetero = sum(
+                abs(HETERO.selectionCoeff) *
+                HETERO.mutationType.dominanceCoeff
+            );
+
+        total_ind_relzLoad_homo =
+            total_ind_relzLoad_homo + rl_homo;
+        total_ind_relzLoad_hetero =
+            total_ind_relzLoad_hetero + rl_hetero;
+    }
+
+    total_ind_relzLoad =
+        total_ind_relzLoad_homo + total_ind_relzLoad_hetero;
+
+    mean_ind_relzLoad = total_ind_relzLoad / Pop_size;
+    mean_ind_relzLoad_homo = total_ind_relzLoad_homo / Pop_size;
+    mean_ind_relzLoad_hetero = total_ind_relzLoad_hetero / Pop_size;
+
+    // Fitness values are supplied by the caller; no fitness recalculation here.
+    meanFit = mean(fitness_cached);
+    varFit = var(fitness_cached);
+
+    out = generation + "\t" +
+          p1.id + "\t" +
+          indvCount + "\t" +
+          Pop_size + "\t" +
+          Mutcount + "\t" +
+          "NA" + "\t" +
+          totalLoad + "\t" +
+          pop_relzLoad + "\t" +
+          pop_relzLoad_homo + "\t" +
+          pop_relzLoad_hetero + "\t" +
+          total_ind_relzLoad + "\t" +
+          total_ind_relzLoad_homo + "\t" +
+          total_ind_relzLoad_hetero + "\t" +
+          mean_ind_relzLoad + "\t" +
+          mean_ind_relzLoad_homo + "\t" +
+          mean_ind_relzLoad_hetero + "\t" +
+          mskLoad + "\t" +
+          driftLoad + "\t" +
+          meanFit + "\t" +
+          varFit;
+
+    return out;
+}
+
+// Maximum frequency uses the same entry cohort and observation stage as TM events.
+function (void) registerMax(i ids, i origins, i positions, f qs) {
+    sim.setValue("maxIDs", c(sim.getValue("maxIDs"), ids));
+    sim.setValue("maxOrigins", c(sim.getValue("maxOrigins"), origins));
+    sim.setValue("maxPositions", c(sim.getValue("maxPositions"), positions));
+    sim.setValue("maxInitial", c(sim.getValue("maxInitial"), qs));
+    sim.setValue("maxValues", c(sim.getValue("maxValues"), qs));
+}
+function (void) updateMax(i$ generation, l$ finish) {
+    ids = sim.getValue("maxIDs");
+    if (size(ids) == 0) return;
+    origins = sim.getValue("maxOrigins");
+    positions = sim.getValue("maxPositions");
+    initial = sim.getValue("maxInitial");
+    maxima = sim.getValue("maxValues");
+    muts = sim.mutations;
+    keep = rep(T, size(ids));
+    file = paste0(pathto, "/Output_MaxQ_10-15k/", outPref, "_maxq_10-15k.txt");
+    for (i in seqAlong(ids)) {
+        mut = muts[muts.id == ids[i]];
+        q = 0.0;
+        if (size(mut) == 1) q = sim.mutationFrequencies(p1, mut);
+        maxima[i] = max(c(maxima[i], q));
+        fate = "";
+        if (q == 0.0) fate = "lost";
+        else if (q == 1.0) fate = "fixed";
+        else if (finish) fate = "censored";
+        if (fate != "") {
+            writeFile(file, paste(c(ids[i], origins[i], positions[i], initial[i], maxima[i], fate, generation, generation-origins[i], q), sep="\t"), append=T);
+            keep[i] = F;
+        }
+    }
+    sim.setValue("maxIDs", ids[keep]);
+    sim.setValue("maxOrigins", origins[keep]);
+    sim.setValue("maxPositions", positions[keep]);
+    sim.setValue("maxInitial", initial[keep]);
+    sim.setValue("maxValues", maxima[keep]);
+}

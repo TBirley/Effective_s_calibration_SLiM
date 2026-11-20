@@ -1,0 +1,2 @@
+source('common.R'); m<-manifest(); d<-rbindlist(lapply(seq_len(nrow(m)),function(i) attach_meta(fread(file_one(m$run_dir[i],'_Vk\\.txt$')),m[i])),fill=TRUE)
+write(d,'vk_observations'); a<-d[,.(Ne=mean(Ne_from_Vk),Vk=mean(Vk),population=mean(Population_size)),by=c(keys,'seed')]; a[,Ne_over_Nc:=Ne/Nc]; write(a,'vk_by_seed'); write(a[,c(ci(Ne),list(Ne_over_Nc=mean(Ne_over_Nc),Vk=mean(Vk))),by=keys],'ne_summary')

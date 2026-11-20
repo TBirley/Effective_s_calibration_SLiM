@@ -1,0 +1,3 @@
+source('common.R'); m<-manifest(); width<-as.numeric(Sys.getenv('MAXQ_BIN_WIDTH','0.005')); nb<-round(1/width); stopifnot(abs(nb*width-1)<1e-10)
+d<-rbindlist(lapply(seq_len(nrow(m)),function(i){ a<-m[i]; z<-fread(file_one(a$run_dir,'_maxq_10-15k\\.txt$')); if(!nrow(z)) return(NULL); bin<-pmin(nb-1L,as.integer(floor(z$Max_q/width+1e-10))); counts<-tabulate(bin+1L,nbins=nb); attach_meta(data.table(bin=seq_len(nb)-1L,q_lower=(seq_len(nb)-1)*width,q_upper=seq_len(nb)*width,count=counts,density=counts/nrow(z)/width),a) }),fill=TRUE)
+write(d,'maxq_by_seed'); write(d[,ci(density),by=c(keys,'bin','q_lower','q_upper')],'maxq_summary')

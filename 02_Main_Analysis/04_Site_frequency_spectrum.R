@@ -1,0 +1,4 @@
+source('common.R'); m<-manifest(); target<-as.integer(Sys.getenv('SFS_GENERATION','30000'))
+d<-rbindlist(lapply(seq_len(nrow(m)),function(i){ a<-m[i]; z<-fread(file_one(a$run_dir,'_mutation_frequencies\\.txt$')); z<-z[Generation==target & Stage=='pre_selection']; if(!nrow(z)) { warning('No nonempty SFS at requested generation: ',a$run_dir); return(NULL) }; z<-z[Mutation_ID!=-1]; if(anyDuplicated(z$Mutation_ID)||any(z$q<=0|z$q>1)) stop('Invalid SFS'); bin<-pmin(199L,as.integer(floor(z$q*200+1e-10))); counts<-tabulate(bin+1L,nbins=200); attach_meta(data.table(Generation=target,bin=0:199,q_lower=(0:199)/200,q_upper=(1:200)/200,count=counts),a) }),fill=TRUE)
+if(!nrow(d)) stop('No requested SFS snapshots; see README')
+write(d,'sfs_by_seed'); write(d[,ci(count),by=c(keys,'Generation','bin','q_lower','q_upper')],'sfs_summary')
